@@ -4,7 +4,9 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from urllib.parse import quote
 
+import aiohttp
 from playwright.async_api import async_playwright, Playwright, Browser
 from astrbot.api import logger
 
@@ -22,7 +24,7 @@ class Request:
         self.elf_catalog_cache: List[Dict] = []
         
         # 配队详情缓存
-        self.team_detail_cache: Dict[str, tuple] = {}  # team_id -> (data, expire_time)
+        self.team_detail_cache: Dict[str, tuple] = {}
         self.team_cache_ttl = timedelta(hours=1)
 
     async def _ensure_browser(self):
@@ -61,18 +63,15 @@ class Request:
         await route.continue_()
     
     async def fetch_catalog(self, url: str, retries: int = 3) -> List[Dict[str, str]]:
-        """滚动加载所有精灵，解决只能抓取第一页的问题"""
+        """滚动加载所有精灵"""
         await self._ensure_browser()
         for attempt in range(retries):
             page = await self._context.new_page()
             try:
                 await asyncio.sleep(random.uniform(1, 3))
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                
-                # 等待初始卡片出现
                 await page.wait_for_selector(".pokemon-card", timeout=15000)
                 
-                # 滚动加载所有精灵
                 previous_count = 0
                 max_scrolls = 50
                 scroll_attempts = 0
@@ -82,7 +81,6 @@ class Request:
                     logger.info(f"当前已加载 {current_count} 个卡片")
                     
                     if current_count == previous_count:
-                        # 数量未增加，再滚动一次尝试触发加载
                         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                         await asyncio.sleep(1.5)
                         new_cards = await page.query_selector_all(".pokemon-card")
@@ -92,13 +90,11 @@ class Request:
                             previous_count = len(new_cards)
                             continue
                     
-                    # 滚动到底部
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     await asyncio.sleep(1.5)
                     previous_count = current_count
                     scroll_attempts += 1
                 
-                # 最终获取所有卡片
                 cards = await page.query_selector_all(".pokemon-card")
                 logger.info(f"滚动加载完成，共找到 {len(cards)} 个卡片")
                 
@@ -171,7 +167,7 @@ class Request:
                 await page.close()
         return []
 
-    async def screenshot(self, t_id: str, selector_type: str = "", is_id: bool = False) -> Path:
+    async def screenshot(self, t_id: str) -> Path:
         cache_path = self.screenshots_dir / f"{t_id}.png"
         if cache_path.exists():
             return cache_path
@@ -709,15 +705,13 @@ class Request:
             await html_page.close()
 
     async def single_lottery(self, item: Dict[str, str]) -> Path:
-        """单张精灵大图抽奖，正方形，填充满图片"""
+        """单张精灵大图抽奖"""
         await self._ensure_browser()
         t_id = item["t_id"]
         name = item["name"]
         avatar = item.get("avatar", "")
         
-        # 获取头像（优先使用缓存的）
         if not avatar:
-            # 尝试从首页卡片抓取（备用）
             page_temp = await self._context.new_page()
             try:
                 await page_temp.goto("https://wiki.lcx.cab/lk/index.php", wait_until="domcontentloaded", timeout=30000)
@@ -738,7 +732,6 @@ class Request:
         if not avatar:
             avatar = "https://via.placeholder.com/512?text=No+Image"
         
-        # 生成正方形大图 HTML
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = self.lottery_dir / f"single_lottery_{timestamp}.png"
         
@@ -750,11 +743,7 @@ class Request:
             <head>
                 <meta charset="UTF-8">
                 <style>
-                    * {{
-                        margin: 0;
-                        padding: 0;
-                        box-sizing: border-box;
-                    }}
+                    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
                     body {{
                         width: 1024px;
                         height: 1024px;
@@ -826,8 +815,6 @@ class Request:
             """
             await html_page.set_content(html_content, wait_until="commit", timeout=20000)
             await html_page.wait_for_timeout(1000)
-            
-            # 设置视口为正方形
             await html_page.set_viewport_size({"width": 1024, "height": 1024})
             await html_page.screenshot(path=str(out_path), full_page=True)
             return out_path
@@ -836,10 +823,16 @@ class Request:
         finally:
             await html_page.close()
 
-    # ========== 技能相关方法 ==========
+    async def lottery(self, items: List[Dict[str, str]]) -> Path:
+        """十连抽"""
+        tasks = [self.single_lottery(item) for item in items]
+        results = await asyncio.gather(*tasks)
+        # 简单合并（实际返回最后一个，但抽奖功能会依次发送多张图，这里简单处理）
+        return results[-1] if results else None
+
+    # ========== 技能相关 ==========
     async def fetch_skill_catalog(self, url: str, retries: int = 3) -> List[Dict[str, str]]:
         await self._ensure_browser()
-        
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(url)
         base_api_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path.replace("skill_list.php", "get_skill_data.php"), "", "", ""))
@@ -858,7 +851,6 @@ class Request:
                 "direction": "desc",
                 "energy_value": "all"
             }
-            
             page_obj = None
             try:
                 page_obj = await self._context.new_page()
@@ -866,25 +858,20 @@ class Request:
                 if not response.ok:
                     logger.error(f"请求技能 API 失败，状态码: {response.status}")
                     break
-                
                 data = await response.json()
                 if not isinstance(data, list) or len(data) == 0:
                     has_more = False
                     break
-                
                 for skill in data:
                     skill_id = str(skill.get("id", ""))
                     name = skill.get("name", "").strip()
                     if skill_id and name:
                         all_skills.append({"name": name, "skill_id": skill_id})
-                
                 logger.info(f"抓取技能第 {page} 页，获得 {len(data)} 个技能")
-                
                 if len(data) < 20:
                     has_more = False
                 else:
                     page += 1
-                    
             except Exception as e:
                 logger.error(f"请求技能 API 失败 (第 {page} 页): {e}")
                 if page == 1:
@@ -893,7 +880,6 @@ class Request:
             finally:
                 if page_obj:
                     await page_obj.close()
-        
         if all_skills:
             logger.info(f"成功抓取 {len(all_skills)} 个技能")
             return all_skills
@@ -917,20 +903,15 @@ class Request:
             data = await detail_page.evaluate('''() => {
                 const card = document.querySelector('.detailed-skill-card');
                 if (!card) return {};
-                
                 const nameElem = card.querySelector('.detailed-skill-name');
                 const name = nameElem ? nameElem.innerText.trim() : '';
-                
                 const iconElem = card.querySelector('.detailed-skill-icon');
                 let icon = iconElem ? iconElem.src : '';
-                
                 const statCols = card.querySelectorAll('.detailed-skill-stats .stat-col');
                 let energy = '', categoryIcon = '', categoryName = '', typeIcon = '', typeName = '', power = '';
-                
                 if (statCols.length >= 4) {
                     const energySpan = statCols[0].querySelector('.stat-value');
                     if (energySpan) energy = energySpan.innerText.trim();
-                    
                     let catText = statCols[1].innerText.trim();
                     if (catText) {
                         categoryName = catText;
@@ -944,7 +925,6 @@ class Request:
                     }
                     const catImgElem = statCols[1].querySelector('.stat-icon');
                     if (catImgElem) categoryIcon = catImgElem.src;
-                    
                     let typeText = statCols[2].innerText.trim();
                     if (typeText) {
                         typeName = typeText;
@@ -958,14 +938,11 @@ class Request:
                     }
                     const typeImgElem = statCols[2].querySelector('.stat-icon');
                     if (typeImgElem) typeIcon = typeImgElem.src;
-                    
                     const powerSpan = statCols[3].querySelector('.stat-value');
                     if (powerSpan) power = powerSpan.innerText.trim();
                 }
-                
                 const descElem = card.querySelector('.detailed-skill-desc');
                 const description = descElem ? descElem.innerText.trim() : '';
-                
                 let acquireInfo = '';
                 const sections = document.querySelectorAll('.section-card');
                 for (const sec of sections) {
@@ -982,7 +959,6 @@ class Request:
                     const fallback = document.querySelector('.alert-success, .alert-info');
                     if (fallback) acquireInfo = fallback.innerText.trim();
                 }
-                
                 const compatiblePokemons = [];
                 const pokemonLinks = document.querySelectorAll('a[href*="detail.php?t_id="]');
                 for (const link of pokemonLinks) {
@@ -1012,7 +988,6 @@ class Request:
                         }
                     }
                 }
-                
                 return { name, icon, energy, categoryIcon, categoryName, typeIcon, typeName, power, description, acquireInfo, compatiblePokemons };
             }''')
             
@@ -1034,11 +1009,9 @@ class Request:
                         pokemon['avatar'] = 'https://wiki.lcx.cab/lk/' + pokemon['avatar'].lstrip('/')
             
             html_content = self._build_skill_html(data, skill_id)
-            
             html_page = await self._context.new_page()
             await html_page.set_content(html_content, wait_until="commit", timeout=20000)
             await html_page.wait_for_timeout(1000)
-            
             try:
                 await html_page.wait_for_function(
                     '''() => {
@@ -1049,12 +1022,10 @@ class Request:
                 )
             except:
                 pass
-            
             await html_page.set_viewport_size({"width": 600, "height": 1})
             await html_page.screenshot(path=str(cache_path), full_page=True)
             await html_page.close()
             return cache_path
-            
         except Exception as e:
             try:
                 content = await detail_page.content()
@@ -1331,9 +1302,8 @@ class Request:
         </html>
         """
 
-    # ========== 配队相关方法 ==========
+    # ========== 配队相关 ==========
     async def fetch_all_teams(self, url: str = "https://wiki.lcx.cab/lk/recommended_teams.php") -> List[Dict]:
-        """获取所有配队的基本信息（ID，名称，描述）"""
         await self._ensure_browser()
         page = await self._context.new_page()
         try:
@@ -1341,13 +1311,10 @@ class Request:
             await page.goto(url, wait_until="networkidle", timeout=30000)
             await page.wait_for_selector(".team-card", timeout=15000)
             await asyncio.sleep(1)
-
             team_cards = await page.query_selector_all(".team-card")
             logger.info(f"找到 {len(team_cards)} 个队伍卡片")
-
             teams = []
             for card in team_cards:
-                # 提取队伍 ID
                 team_id = None
                 detail_btn = await card.query_selector(".btn-detail")
                 if detail_btn:
@@ -1366,23 +1333,19 @@ class Request:
                 if not team_id:
                     logger.warning("无法提取队伍 ID，跳过该卡片")
                     continue
-
                 name_elem = await card.query_selector(".team-name")
                 team_name = await name_elem.inner_text() if name_elem else f"队伍 {team_id}"
                 team_name = team_name.strip()
-
                 desc_elem = await card.query_selector(".team-description-bottom p")
                 if not desc_elem:
                     desc_elem = await card.query_selector(".card-body .text-muted")
                 description = await desc_elem.inner_text() if desc_elem else ""
                 description = description.strip()
-
                 teams.append({
                     "team_id": team_id,
                     "name": team_name,
                     "description": description
                 })
-
             logger.info(f"成功抓取到 {len(teams)} 个配队")
             if not teams:
                 content = await page.content()
@@ -1398,14 +1361,11 @@ class Request:
             await page.close()
 
     async def fetch_team_detail(self, team_id: str) -> Dict:
-        """获取配队详细信息（带缓存）"""
-        # 检查缓存
         if team_id in self.team_detail_cache:
             cached_data, expire_time = self.team_detail_cache[team_id]
             if datetime.now() < expire_time:
                 logger.info(f"使用缓存的配队详情 team_id={team_id}")
                 return cached_data
-
         await self._ensure_browser()
         page = await self._context.new_page()
         try:
@@ -1413,7 +1373,6 @@ class Request:
             logger.info(f"加载配队详情页: {url}")
             await page.goto(url, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(1)
-
             data = await page.evaluate('''() => {
                 const result = {
                     team_name: '',
@@ -1435,7 +1394,6 @@ class Request:
                 const weakDiv = document.getElementById('teamWeakAgainst');
                 if (strongDiv) result.type_analysis.advantage = strongDiv.innerText.trim();
                 if (weakDiv) result.type_analysis.weakness = weakDiv.innerText.trim();
-
                 const filledSlots = document.querySelectorAll('.pokemon-slot.filled');
                 filledSlots.forEach(slot => {
                     const pokemon = { name: '', t_id: '', avatar: '', pvp_stats: {}, base_stats: {}, skills: [] };
@@ -1478,8 +1436,6 @@ class Request:
                 });
                 return result;
             }''')
-
-            # 补全头像
             if self.elf_catalog_cache:
                 for p in data['pokemons']:
                     if not p.get('avatar') and p.get('t_id'):
@@ -1489,8 +1445,6 @@ class Request:
                                 break
                     if p.get('avatar') and not p['avatar'].startswith('http'):
                         p['avatar'] = 'https://wiki.lcx.cab/lk/' + p['avatar'].lstrip('/')
-            
-            # 存入缓存
             self.team_detail_cache[team_id] = (data, datetime.now() + self.team_cache_ttl)
             return data
         except Exception as e:
@@ -1508,14 +1462,10 @@ class Request:
             await page.close()
 
     async def find_teams_by_pokemon(self, pokemon_name_or_id: str, max_concurrent: int = 5) -> List[Dict]:
-        """根据精灵名称或ID查找包含该精灵的所有配队（并发加速）"""
         all_teams = await self.fetch_all_teams()
         if not all_teams:
             return []
-        
-        # 使用信号量控制并发数，避免对服务器压力过大
         semaphore = asyncio.Semaphore(max_concurrent)
-        
         async def check_team(team: Dict) -> Optional[Dict]:
             async with semaphore:
                 try:
@@ -1531,17 +1481,11 @@ class Request:
                 except Exception as e:
                     logger.warning(f"检查配队 {team['team_id']} 时出错: {e}")
                 return None
-        
-        # 并发执行所有检查任务
         tasks = [check_team(team) for team in all_teams]
         results = await asyncio.gather(*tasks)
-        
-        # 过滤掉 None 结果
-        matched = [r for r in results if r is not None]
-        return matched
+        return [r for r in results if r is not None]
 
     async def team_screenshot(self, team_id: str) -> Path:
-        """生成配队详细信息的截图"""
         cache_path = self.screenshots_dir / f"team_{team_id}.png"
         if cache_path.exists():
             return cache_path
@@ -1576,17 +1520,14 @@ class Request:
             for stat, val in p.get('base_stats', {}).items():
                 base_stats_html += f"<div class='stat-item'><span class='stat-label'>{stat}</span><span class='stat-value'>{val}</span></div>"
             base_stats_html += "</div></div>"
-            
             pvp_stats_html = "<div class='stats-subsection'><div class='subtitle'>PVP属性值</div><div class='stats-grid'>"
             for stat, val in p.get('pvp_stats', {}).items():
                 pvp_stats_html += f"<div class='stat-item'><span class='stat-label'>{stat}</span><span class='stat-value'>{val}</span></div>"
             pvp_stats_html += "</div></div>"
-            
             skills_html = "<div class='skills-subsection'><div class='subtitle'>技能配置</div><div class='skills-list'>"
             for skill in p.get('skills', []):
                 skills_html += f"<span class='skill-badge'>{skill}</span>"
             skills_html += "</div></div>"
-            
             pokemons_html += f"""
             <div class="pokemon-detail-card">
                 <div class="pokemon-header">
@@ -1600,7 +1541,6 @@ class Request:
                 </div>
             </div>
             """
-        
         analysis = data.get('type_analysis', {})
         analysis_html = f"""
         <div class="analysis-section">
@@ -1611,7 +1551,6 @@ class Request:
             </div>
         </div>
         """
-        
         trainer_skill_html = ""
         if data.get('trainer_skill'):
             trainer_skill_html = f"""
@@ -1620,7 +1559,6 @@ class Request:
                 <div class="skill-content">{data['trainer_skill']}</div>
             </div>
             """
-        
         return f"""
         <!DOCTYPE html>
         <html>
@@ -1784,6 +1722,177 @@ class Request:
         </body>
         </html>
         """
+
+    # ========== 蛋组相关 ==========
+    async def get_egg_group(self, elf_name: str) -> dict:
+        encoded_name = quote(elf_name)
+        url = f"https://wiki.lcx.cab/lk/egg_group.php?action=search&name={encoded_name}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {"success": False, "error": f"HTTP {resp.status}"}
+                data = await resp.json()
+        searched = data.get("searched_pokemon")
+        if not searched:
+            return {"success": False, "error": "未找到该精灵"}
+        return {
+            "success": True,
+            "name": searched.get("name", elf_name),
+            "t_id": searched.get("t_id", ""),
+            "egg_group": searched.get("egg_group", ""),
+            "cannot_breed": data.get("cannot_breed", False),
+            "breedable_pokemons": data.get("breedable_pokemons", [])
+        }
+
+    async def generate_egg_group_image(self, elf_name: str, egg_group: str, breedable_list: List[Dict], exclude_t_id: str = "") -> Optional[Path]:
+        filtered = [p for p in breedable_list if p.get("t_id") != exclude_t_id]
+        if not filtered:
+            return None
+        cache_path = self.screenshots_dir / f"egg_group_{elf_name}.png"
+        if cache_path.exists():
+            return cache_path
+        items_html = ""
+        for pokemon in filtered:
+            t_id = pokemon.get("t_id", "")
+            name = pokemon.get("name", "")
+            attrs = pokemon.get("attributes", "")
+            avatar = ""
+            if self.elf_catalog_cache:
+                for elf in self.elf_catalog_cache:
+                    if elf["t_id"] == t_id:
+                        avatar = elf.get("avatar", "")
+                        break
+            if not avatar:
+                avatar = "https://via.placeholder.com/80?text=No+Img"
+            items_html += f"""
+            <div class="pokemon-item">
+                <img class="avatar" src="{avatar}" referrerpolicy="no-referrer" onerror="this.src='https://via.placeholder.com/80?text=Error'">
+                <div class="name">{name}</div>
+                <div class="attributes">{attrs}</div>
+            </div>
+            """
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                body {{
+                    background: #1a2a3a;
+                    padding: 20px;
+                    font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+                }}
+                .container {{
+                    max-width: 800px;
+                    margin: 0 auto;
+                    background: white;
+                    border-radius: 24px;
+                    overflow: hidden;
+                    box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+                }}
+                .header {{
+                    background: linear-gradient(135deg, #f5af19, #f12711);
+                    padding: 20px;
+                    color: white;
+                }}
+                .header h1 {{
+                    font-size: 24px;
+                    margin-bottom: 8px;
+                }}
+                .header p {{
+                    font-size: 14px;
+                    opacity: 0.9;
+                }}
+                .grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                    gap: 16px;
+                    padding: 20px;
+                }}
+                .pokemon-item {{
+                    background: #f8f9fc;
+                    border-radius: 16px;
+                    padding: 12px;
+                    text-align: center;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+                }}
+                .avatar {{
+                    width: 80px;
+                    height: 80px;
+                    object-fit: contain;
+                    margin-bottom: 8px;
+                }}
+                .name {{
+                    font-weight: bold;
+                    font-size: 14px;
+                    margin-bottom: 4px;
+                }}
+                .attributes {{
+                    font-size: 12px;
+                    color: #6c757d;
+                }}
+                .footer {{
+                    background: #f0f2f5;
+                    text-align: center;
+                    padding: 12px;
+                    font-size: 12px;
+                    color: #6c757d;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🥚 {elf_name} 的同蛋组精灵</h1>
+                    <p>蛋组：{egg_group} | 共 {len(filtered)} 只（已排除自身）</p>
+                </div>
+                <div class="grid">
+                    {items_html}
+                </div>
+                <div class="footer">洛克王国 Wiki 数据 | 蛋组信息</div>
+            </div>
+        </body>
+        </html>
+        """
+        await self._ensure_browser()
+        page = await self._context.new_page()
+        try:
+            await page.set_content(html_content, wait_until="commit", timeout=20000)
+            await page.wait_for_timeout(1000)
+            try:
+                await page.wait_for_function(
+                    '''() => {
+                        const imgs = document.querySelectorAll('img');
+                        return Array.from(imgs).every(img => img.complete);
+                    }''',
+                    timeout=15000
+                )
+            except Exception as e:
+                logger.warning(f"等待蛋组图片加载超时，继续截图: {e}")
+            await page.set_viewport_size({"width": 800, "height": 1})
+            await page.screenshot(path=str(cache_path), full_page=True)
+            return cache_path
+        finally:
+            await page.close()
+
+    # ========== 孵蛋规划 ==========
+    async def get_breeding_plan(self, parent_name: str, target_name: str, gender: str, shiny_only: bool = False) -> dict:
+        encoded_parent = quote(parent_name)
+        encoded_target = quote(target_name)
+        url = f"https://wiki.lcx.cab/lk/egg_group_new.php?action=search&parent={encoded_parent}&target={encoded_target}&gender={gender}"
+        if shiny_only:
+            url += "&shiny_only=1"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}"}
+                try:
+                    data = await resp.json()
+                    return data
+                except Exception as e:
+                    logger.error(f"解析生蛋规划 JSON 失败: {e}")
+                    return {"error": "服务器返回了无效数据"}
 
     async def close(self):
         if self._context:

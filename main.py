@@ -77,7 +77,7 @@ class RocoWiki(Star):
             logger.error(f"截图失败: {e}")
             yield event.plain_result(f"❌ 查询失败：{str(e)}")
 
-    @filter.command("查精灵图鉴")
+    @filter.command("查精灵")
     async def elf(self, event: AstrMessageEvent, name: str):
         async for result in self._query_elf(event, name):
             yield result
@@ -86,7 +86,7 @@ class RocoWiki(Star):
     async def props(self, event: AstrMessageEvent, name: str):
         yield event.plain_result("❌ 新站暂未提供道具图鉴，该命令暂不可用。")
 
-    @filter.command("查技能图鉴")
+    @filter.command("查技能")
     async def skills(self, event: AstrMessageEvent, name: str):
         catalog = getattr(self, "skills", [])
         if not catalog:
@@ -157,6 +157,105 @@ class RocoWiki(Star):
         except Exception as e:
             logger.error(f"生成配队截图失败: {e}")
             yield event.plain_result(f"❌ 生成失败：{str(e)}")
+
+    @filter.command("查蛋组")
+    async def egg_group(self, event: AstrMessageEvent, name: str):
+        """查询精灵的蛋组信息，并返回同蛋组所有精灵的长图"""
+        yield event.plain_result(f"🥚 正在查询 {name} 的蛋组信息...")
+        try:
+            result = await self.request.get_egg_group(name)
+            if not result["success"]:
+                yield event.plain_result(f"❌ 查询失败：{result.get('error', '未知错误')}")
+                return
+            
+            # 文本回复
+            msg = f"✨ 精灵：{result['name']}\n📦 蛋组：{result['egg_group']}"
+            if result.get("cannot_breed"):
+                msg += "\n⚠️ 该精灵无法繁殖"
+            yield event.plain_result(msg)
+            
+            # 生成同蛋组精灵图片
+            breedable = result.get("breedable_pokemons", [])
+            if breedable:
+                yield event.plain_result(f"🖼️ 正在生成同蛋组精灵图片（共 {len(breedable)} 只，排除自身后可能更少）...")
+                image_path = await self.request.generate_egg_group_image(
+                    result['name'], result['egg_group'], breedable, exclude_t_id=result.get('t_id', '')
+                )
+                if image_path:
+                    yield event.image_result(str(image_path))
+                else:
+                    yield event.plain_result("📭 该蛋组没有其他精灵。")
+            else:
+                yield event.plain_result("📭 该蛋组没有其他精灵（或无法繁殖）。")
+        except Exception as e:
+            logger.error(f"蛋组查询异常: {e}")
+            yield event.plain_result(f"❌ 查询失败：{str(e)}")
+
+    @filter.command("查孵蛋")
+    async def breeding_plan(self, event: AstrMessageEvent, known_with_gender: str, target_pokemon: str):
+        """查询孵蛋路径：查孵蛋 公柴渣虫 幻影灵菇"""
+        # 从第一个参数提取性别和精灵名称
+        known_with_gender = known_with_gender.strip()
+        if known_with_gender.startswith(("公", "♂", "雄", "male")):
+            gender = "male"
+            known_pokemon = known_with_gender[1:]  # 去掉第一个字符
+        elif known_with_gender.startswith(("母", "♀", "雌", "female")):
+            gender = "female"
+            known_pokemon = known_with_gender[1:]
+        else:
+            yield event.plain_result("❌ 请使用格式：查孵蛋 公精灵名 目标精灵名 或 查孵蛋 母精灵名 目标精灵名")
+            return
+        
+        if not known_pokemon or not target_pokemon:
+            yield event.plain_result("❌ 请正确输入精灵名称，例如：查孵蛋 公柴渣虫 幻影灵菇")
+            return
+        
+        gender_cn = "公" if gender == "male" else "母"
+        yield event.plain_result(f"🥚 正在规划从 {known_pokemon}({gender_cn}) 到 {target_pokemon} 的孵蛋路径...")
+        try:
+            result = await self.request.get_breeding_plan(known_pokemon, target_pokemon, gender)
+            
+            if "error" in result:
+                yield event.plain_result(f"❌ 规划失败：{result['error']}")
+                return
+            
+            if result.get("error"):
+                yield event.plain_result(f"❌ {result['error']}")
+                return
+            
+            plan = result.get("breeding_plan")
+            if not plan or plan.get("steps", 0) == 0:
+                yield event.plain_result("❌ 无法找到可行的孵蛋路径")
+                return
+            
+            # 构建回复文本
+            msg_lines = []
+            msg_lines.append(f"✨ 已知精灵：{result['parent_pokemon']['name']} ({'♂' if gender == 'male' else '♀'})")
+            msg_lines.append(f"🎯 目标精灵：{result['target_pokemon']['name']}")
+            msg_lines.append(f"📊 需要 {plan['steps']} 代{'（直接生蛋）' if plan['type'] == 'direct' else '（多代孵蛋）'}")
+            msg_lines.append("")
+            
+            for step in plan["plan"]:
+                p1 = step["parent1"]["name"]
+                p2 = step["parent2"]["name"]
+                p1_gender = "♂" if step["parent1_gender"] == "male" else "♀"
+                p2_gender = "♂" if step["parent2_gender"] == "male" else "♀"
+                result_name = step["result"]["name"]
+                result_gender = "♂" if step["result_gender"] == "male" else "♀"
+                note = step.get("note", "")
+                
+                step_desc = f"{step['step']}. {p1} ({p1_gender}) ❤️ {p2} ({p2_gender}) → {result_name} ({result_gender})"
+                if note:
+                    step_desc += f" （{note}）"
+                msg_lines.append(step_desc)
+            
+            msg_lines.append("")
+            msg_lines.append("⚠️ 注意：孵蛋并非100%成功，且子代性别随机。如需特定性别，可能需要多次尝试。")
+            
+            yield event.plain_result("\n".join(msg_lines))
+        except Exception as e:
+            logger.error(f"孵蛋规划异常: {e}")
+            yield event.plain_result(f"❌ 查询失败：{str(e)}")
 
     async def terminate(self):
         await self.request.close()
