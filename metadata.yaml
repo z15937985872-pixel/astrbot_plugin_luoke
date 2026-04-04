@@ -1,5 +1,15 @@
-name: X
-display_name: X
-desc: X
-version: v1.0.0
-author: X
+name: astrbot_plugin_luoke
+display_name: 洛克王国 Wiki 图鉴助手
+desc: 提供精灵、技能、配队查询，支持每日单抽精灵，数据来源于 wiki.lcx.cab/lk
+version: 1.0
+author: Improved
+repository: https://github.com/z15937985872-pixel/astrbot_plugin_luoke
+tags:
+  - 游戏
+  - 洛克王国
+  - 图鉴
+  - 抽奖
+dependencies:
+  - playwright
+python_requires: ">=3.8"
+astrbot_version: ">=3.0.0"
