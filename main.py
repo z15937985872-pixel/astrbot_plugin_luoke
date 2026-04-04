@@ -117,10 +117,10 @@ class RocoWiki(Star):
     @filter.command("抽精灵")
     async def lottery(self, event: AstrMessageEvent):
         elf_list = getattr(self, "elf", [])
-        if len(elf_list) < 10:
+        if len(elf_list) < 1:
             yield event.plain_result("❌ 精灵图鉴数量不足，无法抽奖。")
             return
-        selected = random.sample(elf_list, 10)
+        selected = random.sample(elf_list, 1)
         yield event.plain_result(f"🎲 正在抽取 {len(selected)} 只精灵，请稍候……")
         try:
             image_path = await self.request.lottery(selected)
