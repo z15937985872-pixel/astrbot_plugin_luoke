@@ -708,75 +708,133 @@ class Request:
         finally:
             await html_page.close()
 
-    async def lottery(self, items: List[Dict[str, str]]) -> Path:
+    async def single_lottery(self, item: Dict[str, str]) -> Path:
+        """单张精灵大图抽奖，正方形，填充满图片"""
         await self._ensure_browser()
-        page = await self._context.new_page()
+        t_id = item["t_id"]
+        name = item["name"]
+        avatar = item.get("avatar", "")
+        
+        # 获取头像（优先使用缓存的）
+        if not avatar:
+            # 尝试从首页卡片抓取（备用）
+            page_temp = await self._context.new_page()
+            try:
+                await page_temp.goto("https://wiki.lcx.cab/lk/index.php", wait_until="domcontentloaded", timeout=30000)
+                card = await page_temp.query_selector(f".pokemon-card[onclick*='navigateToDetail(\"{t_id}\")']")
+                if card:
+                    img_elem = await card.query_selector("img")
+                    if img_elem:
+                        src = await img_elem.get_attribute("src")
+                        if src:
+                            if not src.startswith("http"):
+                                src = "https://wiki.lcx.cab/lk/" + src
+                            avatar = src
+            except:
+                pass
+            finally:
+                await page_temp.close()
+        
+        if not avatar:
+            avatar = "https://via.placeholder.com/512?text=No+Image"
+        
+        # 生成正方形大图 HTML
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = self.lottery_dir / f"single_lottery_{timestamp}.png"
+        
+        html_page = await self._context.new_page()
         try:
-            await page.goto("https://wiki.lcx.cab/lk/index.php", wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_selector(".pokemon-card", timeout=15000)
-            
-            cards_html = []
-            for item in items:
-                t_id = item["t_id"]
-                name = item["name"]
-                avatar = item.get("avatar", "")
-                if not avatar:
-                    card = await page.query_selector(f".pokemon-card[onclick*='navigateToDetail(\"{t_id}\")']")
-                    if not card:
-                        all_cards = await page.query_selector_all(".pokemon-card")
-                        for c in all_cards:
-                            onclick_val = await c.get_attribute("onclick")
-                            if onclick_val and t_id in onclick_val:
-                                card = c
-                                break
-                    if card:
-                        img_elem = await card.query_selector("img")
-                        if img_elem:
-                            src = await img_elem.get_attribute("src")
-                            if src:
-                                if not src.startswith("http"):
-                                    src = "https://wiki.lcx.cab/lk/" + src
-                                avatar = src
-                if not avatar:
-                    avatar = "https://via.placeholder.com/80?text=No+Image"
-                
-                cards_html.append(f"""
-                    <div class="lottery-item">
-                        <img src="{avatar}" loading="lazy" onerror="this.src='https://via.placeholder.com/80?text=Error'">
-                        <span class="title">{name}</span>
-                    </div>
-                """)
-            
-            if not cards_html:
-                raise Exception("未能获取到任何精灵图片")
-            
-            html = f"""
+            html_content = f"""
             <!DOCTYPE html>
             <html>
-            <head><meta charset="UTF-8"><title>抽精灵结果</title></head>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+                    * {{
+                        margin: 0;
+                        padding: 0;
+                        box-sizing: border-box;
+                    }}
+                    body {{
+                        width: 1024px;
+                        height: 1024px;
+                        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+                    }}
+                    .card {{
+                        width: 100%;
+                        height: 100%;
+                        background: radial-gradient(circle at 30% 20%, rgba(255,255,240,0.2), rgba(0,0,0,0.3));
+                        display: flex;
+                        flex-direction: column;
+                        justify-content: center;
+                        align-items: center;
+                        text-align: center;
+                        padding: 40px;
+                    }}
+                    .avatar {{
+                        width: 80%;
+                        max-width: 500px;
+                        background: rgba(255,255,255,0.2);
+                        border-radius: 50%;
+                        padding: 20px;
+                        box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+                        backdrop-filter: blur(5px);
+                    }}
+                    .avatar img {{
+                        width: 100%;
+                        height: auto;
+                        object-fit: contain;
+                        border-radius: 50%;
+                        background: white;
+                    }}
+                    .name {{
+                        margin-top: 40px;
+                        font-size: 48px;
+                        font-weight: bold;
+                        color: #ffdd88;
+                        text-shadow: 4px 4px 8px rgba(0,0,0,0.5);
+                        background: rgba(0,0,0,0.5);
+                        padding: 10px 30px;
+                        border-radius: 60px;
+                        display: inline-block;
+                    }}
+                    .footer {{
+                        margin-top: 40px;
+                        font-size: 24px;
+                        color: rgba(255,255,255,0.8);
+                        background: rgba(0,0,0,0.4);
+                        padding: 8px 20px;
+                        border-radius: 40px;
+                    }}
+                </style>
+            </head>
             <body>
-            <div class="lottery-container">
-                {''.join(cards_html)}
-            </div>
-            <style>
-                body {{ background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }}
-                .lottery-container {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; max-width: 900px; background: white; padding: 20px; border-radius: 16px; box-shadow: 0 8px 20px rgba(0,0,0,0.1); }}
-                .lottery-item {{ text-align: center; background: #fff; border-radius: 12px; padding: 12px; transition: transform 0.2s; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }}
-                .lottery-item:hover {{ transform: scale(1.02); }}
-                .lottery-item img {{ width: 80px; height: 80px; object-fit: contain; margin-bottom: 8px; }}
-                .lottery-item .title {{ font-size: 14px; font-weight: 600; color: #333; display: block; word-break: break-word; }}
-            </style>
+                <div class="card">
+                    <div class="avatar">
+                        <img src="{avatar}" referrerpolicy="no-referrer" 
+                             onerror="this.onerror=null;this.src='https://via.placeholder.com/512?text=LoadFailed'">
+                    </div>
+                    <div class="name">{name}</div>
+                    <div class="footer">✨ 洛克王国 Wiki 今日运势 ✨</div>
+                </div>
             </body>
             </html>
             """
-            await page.set_content(html, wait_until="commit", timeout=15000)
-            await page.wait_for_timeout(1000)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = self.lottery_dir / f"lottery_{timestamp}.png"
-            await page.screenshot(path=str(out_path), full_page=True)
+            await html_page.set_content(html_content, wait_until="commit", timeout=20000)
+            await html_page.wait_for_timeout(1000)
+            
+            # 设置视口为正方形
+            await html_page.set_viewport_size({"width": 1024, "height": 1024})
+            await html_page.screenshot(path=str(out_path), full_page=True)
             return out_path
+        except Exception as e:
+            raise Exception(f"单张抽奖截图生成失败: {e}")
         finally:
-            await page.close()
+            await html_page.close()
 
     # ========== 技能相关方法 ==========
     async def fetch_skill_catalog(self, url: str, retries: int = 3) -> List[Dict[str, str]]:
