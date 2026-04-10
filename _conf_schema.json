@@ -1,2 +1,49 @@
 {
+  "reply_mode": {
+    "type": "string",
+    "description": "回复模式：image=仅图片，text=仅文本，hybrid=先文本再图片（用户可自行选择是否查看图片）",
+    "default": "image",
+    "options": ["image", "text", "hybrid"]
+  },
+  "cache_ttl_hours": {
+    "type": "int",
+    "description": "数据缓存有效期（小时）",
+    "default": 24,
+    "min": 1,
+    "max": 720
+  },
+  "source_mode": {
+    "type": "string",
+    "description": "数据来源模式",
+    "default": "auto",
+    "options": ["auto", "crawler_only", "cache_only"],
+    "hint": "auto=缓存优先，crawler_only=强制在线抓取（不读缓存），cache_only=仅缓存（不抓取新数据）"
+  },
+  "update_mode": {
+    "type": "string",
+    "description": "异步更新模式（仅在 source_mode=auto 且缓存存在时生效）",
+    "default": "disabled",
+    "options": ["disabled", "after_send"],
+    "hint": "after_send：发送缓存后后台刷新缓存（不撤回旧消息）"
+  },
+  "merge_forward_enabled": {
+    "type": "bool",
+    "description": "是否在长文本时使用合并转发（仅QQ/OneBot）",
+    "default": true
+  },
+  "merge_forward_threshold": {
+    "type": "int",
+    "description": "触发合并转发的字数阈值",
+    "default": 900
+  },
+  "merge_forward_platforms": {
+    "type": "string",
+    "description": "启用合并转发的平台列表（逗号分隔）",
+    "default": "aiocqhttp,onebot"
+  },
+  "query_max_results": {
+    "type": "int",
+    "description": "搜索匹配时最多显示的数量",
+    "default": 8
+  }
 }
